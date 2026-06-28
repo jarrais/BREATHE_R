@@ -181,7 +181,7 @@ igr_example <- "330001"
 
 # Lag selected for the lag-specific exposure-response curve.
 
-lag_example <- 3
+lag_example <- 0
 
 
 #==============================================================================
