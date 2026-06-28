@@ -1,7 +1,5 @@
 ################################################################################
 #
-#  BREATHE
-#
 #  Running Health Models in R
 #
 #  Script 02 - Second-stage meta-analysis and BLUP by IGR
@@ -19,118 +17,58 @@
 #
 #   1. Fit a multivariate meta-analysis model with random effects only.
 #   2. Obtain the pooled temperature-mortality association.
-#   3. Predict IGR-specific associations using Best Linear Unbiased Predictions
+#   3. Plot the pooled exposure-response association for Rio de Janeiro.
+#   4. Predict IGR-specific associations using Best Linear Unbiased Predictions
 #      (BLUPs).
-#   4. Estimate the Minimum Mortality Temperature (MMT) for each IGR, restricting
+#   5. Estimate the Minimum Mortality Temperature (MMT) for each IGR, restricting
 #      the search to the 25th to 98th percentiles of the local temperature
 #      distribution.
 #
-# For teaching purposes, we fit a meta-analysis model without meta-predictors.
-# In applied studies, geographic, climatic, demographic, or socioeconomic
-# variables may be included as meta-predictors.
+# This script assumes that the objects created in Script 01 are already
+# available in the R environment:
+#
+#   - data_final
+#   - coefs_all_mat
+#   - vcov_all
+#   - igr_include
 #
 ################################################################################
 
 
 #==============================================================================
-# 1. Output folder
+# 1. Output folders
 #==============================================================================
 
 dir_save <- "results"
+dir_fig  <- file.path(dir_save, "figures")
 
 if (!dir.exists(dir_save)) {
   dir.create(dir_save)
 }
 
-
-#==============================================================================
-# 2. Load first-stage results and temperature data
-#==============================================================================
-
-# Load the coefficients and variance-covariance matrices estimated in the
-# first-stage models.
-
-load(file.path(dir_save, "first_stage_results.RData"))
-
-
-# Load the original dataset.
-# Here we only need the temperature series to define the exposure basis and
-# to estimate the MMT within each IGR.
-
-data_final <- read_parquet("banco_BREATHE_IGR_SIM.parquet")
-
-data_final <- data_final |>
-  mutate(Date = as.Date(Date)) |>
-  filter(!is.na(IGR))
-
-
-#==============================================================================
-# 3. Identify valid first-stage estimates
-#==============================================================================
-
-# Before fitting the meta-analysis, we keep only IGRs with valid coefficients
-# and valid variance-covariance matrices.
-#
-# An IGR is excluded if:
-#
-#   - any coefficient is missing;
-#   - the covariance matrix is missing;
-#   - the covariance matrix has the wrong dimension;
-#   - the covariance matrix contains missing values;
-#   - the covariance matrix is not positive definite.
-
-is_invalid_vcov <- function(mat, expected_dim) {
-  
-  if (!is.matrix(mat)) return(TRUE)
-  if (any(is.na(mat))) return(TRUE)
-  if (any(dim(mat) != expected_dim)) return(TRUE)
-  
-  eig <- eigen(mat, symmetric = TRUE, only.values = TRUE)$values
-  
-  any(eig <= 0)
+if (!dir.exists(dir_fig)) {
+  dir.create(dir_fig)
 }
 
-expected_dim <- ncol(coefs_all_mat)
-
-invalid_coef_igrs <- rownames(coefs_all_mat)[
-  apply(coefs_all_mat, 1, anyNA)
-]
-
-invalid_vcov_igrs <- names(vcov_all)[
-  sapply(vcov_all, is_invalid_vcov, expected_dim = expected_dim)
-]
-
-valid_igrs <- setdiff(
-  igr_include,
-  union(invalid_coef_igrs, invalid_vcov_igrs)
-)
-
-
-# Keep only valid IGRs
-
-coefs_all_mat_clean <- coefs_all_mat[
-  rownames(coefs_all_mat) %in% valid_igrs,
-  ,
-  drop = FALSE
-]
-
-vcov_all_clean <- vcov_all[
-  rownames(coefs_all_mat_clean)
-]
-
 
 #==============================================================================
-# 4. Define the temperature basis for prediction
+# 2. Define temperature variable
 #==============================================================================
 
-# The first-stage coefficients describe the overall cumulative temperature-
-# mortality association using a natural cubic spline with knots at the 10th and
-# 90th percentiles.
-#
-# To obtain pooled and IGR-specific curves, we must recreate the same
-# one-dimensional basis used after cross-reduction.
+# This must be the same temperature variable used in the first-stage models.
 
 temp_var <- "daily_pop_weighted_mean_temperature"
+
+
+#==============================================================================
+# 3. Define the temperature basis for prediction
+#==============================================================================
+
+# The second-stage model combines the reduced cumulative associations obtained
+# in the first stage.
+#
+# To predict pooled and IGR-specific curves, we recreate a one-dimensional
+# temperature basis consistent with the first-stage model specification.
 
 predvar <- quantile(
   data_final[[temp_var]],
@@ -146,23 +84,19 @@ bvar <- onebasis(
 
 
 #==============================================================================
-# 5. Fit the second-stage meta-analysis model
+# 4. Fit the second-stage meta-analysis model
 #==============================================================================
 
-# In this simplified course example, the second-stage model includes only
-# random effects. This allows the temperature-mortality association to vary
-# across IGRs, without introducing meta-predictors.
+# The meta-analysis combines the IGR-specific reduced coefficients from the
+# first stage, accounting for both within-IGR uncertainty and between-IGR
+# heterogeneity.
 #
-# The input consists of:
-#
-#   - coefs_all_mat_clean: reduced coefficients from the first-stage models;
-#   - vcov_all_clean: corresponding within-IGR covariance matrices.
-#
-# The model is fitted using restricted maximum likelihood (REML).
+# In this course example, the model includes random effects only, without
+# meta-predictors.
 
 meta_model <- mixmeta(
-  coefs_all_mat_clean,
-  vcov_all_clean,
+  coefs_all_mat,
+  vcov_all,
   method = "reml",
   control = list(showiter = TRUE)
 )
@@ -171,11 +105,11 @@ summary(meta_model)
 
 
 #==============================================================================
-# 6. Obtain the pooled exposure-response curve
+# 5. Obtain the pooled exposure-response curve
 #==============================================================================
 
-# First, we predict the pooled curve without centering in order to identify
-# the pooled Minimum Mortality Temperature (MMT).
+# First, we predict the pooled curve without centering to identify the pooled
+# Minimum Mortality Temperature.
 
 cp_meta_uncentered <- crosspred(
   bvar,
@@ -190,8 +124,8 @@ MMT_pooled <- cp_meta_uncentered$predvar[
 ]
 
 
-# Then, we predict the pooled curve again, now centering the relative risks
-# at the pooled MMT. After centering, RR = 1 at the MMT.
+# Then, we centre the pooled curve at the pooled MMT.
+# After centering, RR = 1 at the pooled MMT.
 
 cp_meta <- crosspred(
   bvar,
@@ -204,7 +138,7 @@ cp_meta <- crosspred(
 
 
 #==============================================================================
-# 7. Save pooled exposure-response curve
+# 6. Organise pooled exposure-response curve
 #==============================================================================
 
 pooled_curve <- data.frame(
@@ -215,10 +149,65 @@ pooled_curve <- data.frame(
   MMT_pooled  = MMT_pooled
 )
 
-write.csv(
+
+#==============================================================================
+# 7. Plot pooled exposure-response association
+#==============================================================================
+
+# The pooled exposure-response curve summarizes the average temperature-
+# mortality association across all IGRs in Rio de Janeiro after accounting for
+# between-IGR heterogeneity.
+
+P99 <- quantile(
+  data_final[[temp_var]],
+  probs = 0.99,
+  na.rm = TRUE
+)
+
+x_breaks <- sort(unique(round(
+  c(
+    min(pooled_curve$Temperature),
+    MMT_pooled,
+    P99,
+    max(pooled_curve$Temperature)
+  ),
+  1
+)))
+
+p_pooled <- ggplot(
   pooled_curve,
-  file = file.path(dir_save, "pooled_exposure_response_curve.csv"),
-  row.names = FALSE
+  aes(x = Temperature, y = RR)
+) +
+  geom_ribbon(
+    aes(ymin = RR_low, ymax = RR_high),
+    alpha = 0.20
+  ) +
+  geom_line(linewidth = 1.1) +
+  geom_hline(yintercept = 1, linetype = 2) +
+  geom_vline(
+    xintercept = MMT_pooled,
+    linetype = 2
+  ) +
+  geom_vline(
+    xintercept = P99,
+    linetype = 3
+  ) +
+  scale_x_continuous(breaks = x_breaks) +
+  labs(
+    title = "Pooled temperature-mortality association - Rio de Janeiro",
+    x = "Temperature (°C)",
+    y = "Relative Risk"
+  ) +
+  theme_classic()
+
+p_pooled
+
+ggsave(
+  filename = file.path(dir_fig, "pooled_exposure_response_curve.png"),
+  plot = p_pooled,
+  width = 7,
+  height = 5,
+  dpi = 300
 )
 
 
@@ -226,21 +215,15 @@ write.csv(
 # 8. Obtain IGR-specific BLUPs
 #==============================================================================
 
-# BLUPs borrow strength from the full set of IGRs and provide stabilized
-# IGR-specific estimates of the temperature-mortality association.
-#
-# They are useful especially when some IGRs have small populations, sparse
-# mortality counts, or imprecise first-stage estimates.
+# BLUPs provide stabilized IGR-specific estimates by borrowing information
+# across all IGRs included in the meta-analysis.
 
 blup_all <- blup(
   meta_model,
   vcov = TRUE
 )
 
-save(
-  blup_all,
-  file = file.path(dir_save, "blup_results.RData")
-)
+names(blup_all) <- as.character(names(blup_all))
 
 
 #==============================================================================
@@ -249,89 +232,52 @@ save(
 
 # The MMT is estimated separately for each IGR using the BLUP coefficients.
 #
-# To avoid selecting unrealistic values at the extreme cold or hot tails of the
-# local temperature distribution, we restrict the MMT search to temperatures
-# between the 25th and 98th percentiles of each IGR-specific distribution.
-
-names(blup_all) <- as.character(names(blup_all))
+# To avoid selecting unrealistic values at the tails of the local temperature
+# distribution, the MMT search is restricted to temperatures between the 25th
+# and 98th percentiles.
 
 mmt_igr <- data.frame(
-  IGR      = valid_igrs,
+  IGR      = igr_include,
   MMT      = NA_real_,
   MMT_perc = NA_real_,
-  status   = NA_character_,
   stringsAsFactors = FALSE
 )
 
-for (i in seq_along(valid_igrs)) {
+for (i in seq_along(igr_include)) {
   
-  igr_code <- as.character(valid_igrs[i])
+  igr_code <- as.character(igr_include[i])
   
-  cat("Estimating MMT for IGR", i, "of", length(valid_igrs),
+  cat("Estimating MMT for IGR", i, "of", length(igr_include),
       "- IGR:", igr_code, "\n")
   
-  tryCatch({
-    
-    #----------------------------------------------------------------------
-    # Step 1. Extract the temperature series for the current IGR
-    #----------------------------------------------------------------------
-    
-    data_igr <- data_final |>
-      filter(IGR == igr_code)
-    
-    #----------------------------------------------------------------------
-    # Step 2. Define candidate temperatures for the MMT search
-    #----------------------------------------------------------------------
-    
-    # Candidate temperatures are defined as local percentiles from P25 to P98.
-    # This keeps the MMT search within a plausible range of observed
-    # temperatures for each IGR.
-    
-    perc_seq <- 25:98
-    
-    temps <- quantile(
-      data_igr[[temp_var]],
-      probs = perc_seq / 100,
-      na.rm = TRUE
-    )
-    
-    #----------------------------------------------------------------------
-    # Step 3. Recreate the temperature basis for this IGR
-    #----------------------------------------------------------------------
-    
-    # The basis must be compatible with the first-stage reduced coefficients.
-    # Therefore, we use the same spline function and the same knot placement
-    # strategy: internal knots at the local 10th and 90th percentiles.
-    
-    bvar_i <- onebasis(
-      temps,
-      fun = "ns",
-      knots = quantile(data_igr[[temp_var]], c(0.10, 0.90), na.rm = TRUE),
-      Bound = range(data_igr[[temp_var]], na.rm = TRUE)
-    )
-    
-    #----------------------------------------------------------------------
-    # Step 4. Predict the BLUP curve and locate the MMT
-    #----------------------------------------------------------------------
-    
-    coef_i <- blup_all[[igr_code]]$blup
-    
-    rr_i <- as.numeric(
-      exp(bvar_i %*% coef_i)
-    )
-    
-    mmt_position <- which.min(rr_i)
-    
-    mmt_igr$MMT_perc[i] <- perc_seq[mmt_position]
-    mmt_igr$MMT[i] <- as.numeric(temps[mmt_position])
-    mmt_igr$status[i] <- "success"
-    
-  }, error = function(e) {
-    
-    mmt_igr$status[i] <<- paste("error:", e$message)
-    
-    message("Error estimating MMT for IGR ", igr_code, ": ", e$message)
-  })
+  data_igr <- data_final |>
+    filter(IGR == igr_code)
+  
+  perc_seq <- 25:98
+  
+  temps <- quantile(
+    data_igr[[temp_var]],
+    probs = perc_seq / 100,
+    na.rm = TRUE
+  )
+  
+  bvar_i <- onebasis(
+    temps,
+    fun = "ns",
+    knots = quantile(data_igr[[temp_var]], c(0.10, 0.90), na.rm = TRUE),
+    Bound = range(data_igr[[temp_var]], na.rm = TRUE)
+  )
+  
+  coef_i <- blup_all[[igr_code]]$blup
+  
+  rr_i <- as.numeric(
+    exp(bvar_i %*% coef_i)
+  )
+  
+  mmt_position <- which.min(rr_i)
+  
+  mmt_igr$MMT_perc[i] <- perc_seq[mmt_position]
+  mmt_igr$MMT[i] <- as.numeric(temps[mmt_position])
 }
 
 
@@ -339,23 +285,33 @@ for (i in seq_along(valid_igrs)) {
 # 10. Save second-stage results
 #==============================================================================
 
-save(
-  meta_model,
-  cp_meta,
+write.csv(
   pooled_curve,
-  MMT_pooled,
-  blup_all,
-  mmt_igr,
-  file = file.path(dir_save, "second_stage_results.RData")
+  file = file.path(dir_save, "pooled_exposure_response_curve.csv"),
+  row.names = FALSE
 )
 
 write.csv(
   mmt_igr,
-  file = file.path(dir_save, "MMT_by_IGR_after_blup.csv"),
+  file = file.path(dir_save, "MMT_by_IGR_after_BLUP.csv"),
   row.names = FALSE
+)
+
+saveRDS(
+  meta_model,
+  file = file.path(dir_save, "second_stage_meta_model.rds")
+)
+
+saveRDS(
+  cp_meta,
+  file = file.path(dir_save, "pooled_crosspred.rds")
+)
+
+saveRDS(
+  blup_all,
+  file = file.path(dir_save, "BLUP_by_IGR.rds")
 )
 
 ################################################################################
 # End of script
 ################################################################################
-
